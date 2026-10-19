@@ -205,23 +205,62 @@ async function render(){
 }
 async function openMatch(id){
   const f=S.fx.find(x=>x.fixture.id===id);if(!f)return;
+  let tab="verloop",timer=null,last=null;
+  const names={[f.teams.home.id]:f.teams.home.name,[f.teams.away.id]:f.teams.away.name};
   const dlg=document.createElement("dialog");
-  dlg.innerHTML=`<div class="big"><div>${esc(f.teams.home.name)}</div><div class="num">${f.goals.home??"-"} – ${f.goals.away??"-"}</div><div>${esc(f.teams.away.name)}</div></div><p class="hint" style="text-align:center">${esc(f.fixture.venue?.name||"")} ${f.fixture.referee?"· "+esc(f.fixture.referee):""}</p><div id="det">Laden…</div><form method="dialog"><button class="pill" style="margin-top:12px">Sluiten</button></form>`;
-  document.body.append(dlg);dlg.showModal();dlg.addEventListener("close",()=>dlg.remove());
-  try{
-    const j=await api(`/site/v2/sports/soccer/${SLUG[f.league.id]}/summary?event=${id}`,30);
-    const names={[f.teams.home.id]:f.teams.home.name,[f.teams.away.id]:f.teams.away.name};
-    const ic=t=>/goal/i.test(t)?"⚽":/red/i.test(t)?"🟥":/yellow/i.test(t)?"🟨":/substitution/i.test(t)?"🔁":"•";
-    const ev=(j.keyEvents||[]).filter(e=>e.type&&!/kickoff|halftime|end|start/i.test(e.type.text||""));
-    let h=ev.length?ev.map(e=>`<div class="ev"><b>${esc((e.clock&&e.clock.displayValue)||"")}</b><span>${ic(e.type.text||"")}</span><span>${esc(e.shortText||e.text||e.type.text||"")} <span style="color:var(--mute)">${esc(e.team?names[Number(e.team.id)]||"":"")}</span></span></div>`).join(""):`<p class="hint">Nog geen gebeurtenissen.</p>`;
-    const bt=(j.boxscore&&j.boxscore.teams)||[],hb=bt.find(t=>t.homeAway==="home")||bt[0],ab=bt.find(t=>t.homeAway==="away")||bt[1];
-    if(hb&&ab){
-      const g=(t,n)=>{const v=(t.statistics||[]).find(s=>s.name===n);return v?parseFloat(v.displayValue)||0:0};
-      const rows=[["possessionPct","Balbezit","%"],["totalShots","Schoten",""],["shotsOnTarget","Schoten op doel",""],["wonCorners","Hoekschoppen",""],["foulsCommitted","Overtredingen",""]].filter(([k])=>g(hb,k)+g(ab,k)>0);
-      if(rows.length)h+=`<h3 style="margin:14px 0 4px">Statistieken</h3>`+rows.map(([k,n,u])=>{const a=g(hb,k),b=g(ab,k),t=a+b||1;return `<div class="bar"><span>${a}${u}</span><div aria-label="${n}"><i style="width:${a/t*100}%"></i><i style="width:${b/t*100}%"></i></div><span style="text-align:right">${b}${u}</span></div><div class="hint" style="text-align:center;margin:-4px 0 4px">${n}</div>`}).join("");
+  dlg.innerHTML=`<div class="big"><div>${esc(f.teams.home.name)}</div><div><div class="num" id="dsc">${f.goals.home??"-"} – ${f.goals.away??"-"}</div><div class="hint" id="dcl" style="margin:0"></div></div><div>${esc(f.teams.away.name)}</div></div><p class="hint" style="text-align:center">${esc(f.fixture.venue?.name||"")}</p><nav id="dtabs"></nav><div id="det">Laden…</div><p class="hint" id="dlive"></p><form method="dialog"><button class="pill" style="margin-top:6px">Sluiten</button></form>`;
+  document.body.append(dlg);dlg.showModal();
+  dlg.addEventListener("close",()=>{clearInterval(timer);dlg.remove()});
+  const TABS=[["verloop","Verloop"],["opstelling","Opstelling"],["verslag","Liveverslag"],["stats","Statistieken"]];
+  const ic=t=>/goal/i.test(t)?"⚽":/red/i.test(t)?"🟥":/yellow/i.test(t)?"🟨":/substitution/i.test(t)?"🔁":"•";
+  function draw(){
+    dlg.querySelector("#dtabs").innerHTML=TABS.map(([k,n])=>`<button class="pill" data-t="${k}" aria-pressed="${tab===k}">${n}</button>`).join("");
+    const j=last,box=dlg.querySelector("#det");if(!j)return;
+    let h="";
+    if(tab==="verloop"){
+      const ev=(j.keyEvents||[]).filter(e=>e.type&&!/kickoff|halftime|end|start/i.test(e.type.text||""));
+      h=ev.length?ev.map(e=>`<div class="ev"><b>${esc((e.clock&&e.clock.displayValue)||"")}</b><span>${ic(e.type.text||"")}</span><span>${esc(e.shortText||e.text||e.type.text||"")} <span style="color:var(--mute)">${esc(e.team?names[Number(e.team.id)]||"":"")}</span></span></div>`).join(""):`<p class="hint">Nog geen gebeurtenissen.</p>`;
+    }else if(tab==="opstelling"){
+      const r=j.rosters||[];
+      if(!r.length||!r.some(x=>(x.roster||[]).length))h=`<p class="hint">De opstelling is nog niet bekend. Die verschijnt meestal rond een uur voor de aftrap.</p>`;
+      else{
+        const col=x=>{const st=(x.roster||[]).filter(p=>p.starter),bn=(x.roster||[]).filter(p=>!p.starter);
+          const line=p=>`<div style="display:flex;gap:6px;padding:2px 0"><span style="min-width:22px;color:var(--mute);text-align:right">${esc(p.jersey||"")}</span><span>${esc((p.athlete&&p.athlete.displayName)||"")}${p.subbedOut?" 🔁":""}${p.subbedIn?" ⬆":""}</span><span style="color:var(--mute);margin-left:auto">${esc((p.position&&p.position.abbreviation)||"")}</span></div>`;
+          return `<div><h3 style="margin:0 0 6px;font-size:15px">${esc((x.team&&x.team.displayName)||names[Number(x.team&&x.team.id)]||"")}${x.formation?` <small style="color:var(--mute);font-weight:400">${esc(x.formation)}</small>`:""}</h3>${st.map(line).join("")}${bn.length?`<div class="hint" style="margin:8px 0 2px">Bank</div>${bn.map(line).join("")}`:""}</div>`};
+        const hm=r.find(x=>x.homeAway==="home")||r[0],aw=r.find(x=>x.homeAway==="away")||r[1];
+        h=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:14px">${col(hm)}${aw?col(aw):""}</div>`;
+      }
+    }else if(tab==="verslag"){
+      const c=(j.commentary||[]).slice();
+      if(c.length>1&&parseInt((c[0].time&&c[0].time.displayValue)||0)<parseInt((c[c.length-1].time&&c[c.length-1].time.displayValue)||0))c.reverse();
+      h=c.length?c.slice(0,25).map(x=>`<div class="ev" style="grid-template-columns:44px 1fr"><b>${esc((x.time&&x.time.displayValue)||"")}</b><span>${esc(x.text||"")}</span></div>`).join(""):`<p class="hint">Er is nog geen liveverslag voor deze wedstrijd.</p>`;
+    }else{
+      const bt=(j.boxscore&&j.boxscore.teams)||[],hb=bt.find(t=>t.homeAway==="home")||bt[0],ab=bt.find(t=>t.homeAway==="away")||bt[1];
+      const g=(t,n)=>{const v=((t&&t.statistics)||[]).find(s=>s.name===n);return v?parseFloat(v.displayValue)||0:0};
+      const rows=[["possessionPct","Balbezit","%"],["totalShots","Schoten",""],["shotsOnTarget","Schoten op doel",""],["wonCorners","Hoekschoppen",""],["foulsCommitted","Overtredingen",""],["yellowCards","Gele kaarten",""]].filter(([k])=>g(hb,k)+g(ab,k)>0);
+      h=rows.length?rows.map(([k,n,u])=>{const a=g(hb,k),b=g(ab,k),t=a+b||1;return `<div class="bar"><span>${a}${u}</span><div aria-label="${n}"><i style="width:${a/t*100}%"></i><i style="width:${b/t*100}%"></i></div><span style="text-align:right">${b}${u}</span></div><div class="hint" style="text-align:center;margin:-4px 0 4px">${n}</div>`}).join(""):`<p class="hint">Er zijn nog geen statistieken beschikbaar.</p>`;
     }
-    dlg.querySelector("#det").innerHTML=h;
-  }catch(e){dlg.querySelector("#det").innerHTML=`<div class="err">${esc(e.message)}</div>`}
+    const sy=box.scrollTop;box.innerHTML=h;box.scrollTop=sy;
+  }
+  async function pull(){
+    try{
+      const j=await api(`/site/v2/sports/soccer/${SLUG[f.league.id]}/summary?event=${id}`,0);
+      last=j;
+      const c=j.header&&j.header.competitions&&j.header.competitions[0];
+      if(c){const hh=c.competitors.find(x=>x.homeAway==="home"),aa=c.competitors.find(x=>x.homeAway==="away"),ty=c.status&&c.status.type;
+        if(hh&&aa&&ty&&ty.state!=="pre")dlg.querySelector("#dsc").textContent=`${hh.score} – ${aa.score}`;
+        dlg.querySelector("#dcl").textContent=ty&&ty.state==="in"?(ty.name==="STATUS_HALFTIME"?"Rust":c.status.displayClock):ty&&ty.state==="post"?"Einde":"";
+        const live=ty&&ty.state==="in";
+        dlg.querySelector("#dlive").textContent=live?"Live: ververst elke 15 seconden.":"";
+        if(!live&&timer){clearInterval(timer);timer=null}
+        if(live&&!timer)timer=setInterval(pull,15000);
+      }
+      draw();
+    }catch(e){dlg.querySelector("#det").innerHTML=`<div class="err">${esc(e.message)}</div>`}
+  }
+  dlg.addEventListener("click",e=>{const b=e.target.closest("[data-t]");if(b){tab=b.dataset.t;draw()}});
+  if(LIVE.includes(f.fixture.status.short))timer=setInterval(pull,15000);
+  pull();
 }
 app.addEventListener("click",e=>{
   const t=e.target.closest("button,[data-id],input");if(!t)return;
